@@ -1,10 +1,8 @@
 import socket
 import pickle
-import numpy as np
 import time
 from heat_diffusion_sequencial import initialize_grid
 
-##Código teste inicial
 class HeatDiffusionServer:
     """
     Servidor da simulação distribuída de difusão de calor.
