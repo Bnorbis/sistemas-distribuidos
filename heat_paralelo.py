@@ -1,40 +1,39 @@
 import numpy as np
 import time
 import threading
+import os
 
-from heat_diffusion_sequencial import heat_diffusion_sequencial
+from heat_diffusion_sequencial import initialize_grid, heat_diffusion_sequencial
 
-# (Função initialize_grid permanece a mesma)
-def initialize_grid(N, initial_temp=20.0, hot_temp=100.0):
-    grid = np.full((N, N), initial_temp, dtype=np.float64)
-    grid[0, :] = hot_temp
-    return grid
+# VARIÁVEIS GLOBAIS DE CONTROLE PARA SINCRONIZAÇÃO
+GLOBAL_SYNC_LOCK = threading.Lock()
+MAX_CHANGES_LIST = []
+THREADS_COMPUTED = 0 
 
-# --- Nova Função: O trabalho da Thread ---
-def worker_thread(thread_id, num_threads, grids, N, barrier, stop_event, T, max_diff, max_changes):
+# --- Função: O trabalho da Thread (Com a variável corrigida) ---
+def worker_thread(thread_id, grids, N, T, max_diff, **kwargs):
     """
-    Função que cada thread executará.
-    Calcula uma fatia horizontal da matriz.
+    Função alvo da thread. Usa contador e Lock para sincronização.
     """
-    # 1. Determina qual fatia (quais linhas) esta thread calcula
+    global MAX_CHANGES_LIST, THREADS_COMPUTED
+
+    # 1. Determina a fatia de linhas
+    num_threads = grids['num_threads']
     rows_to_calculate = N - 2
-    rows_per_thread = rows_to_calculate // num_threads
-    start_row = 1 + thread_id * rows_per_thread
+    rows_per_thread = rows_to_calculate // num_threads # <--- CORRETO
+    start_row = 1 + thread_id * rows_per_thread # <--- AQUI ESTAVA O ERRO DE DIGITAÇÃO
     
-    # A última thread pega o resto
-    if thread_id == num_threads - 1:
-        end_row = N - 1
-    else:
-        end_row = start_row + rows_per_thread
+    end_row = N - 1 if thread_id == num_threads - 1 else start_row + rows_per_thread
 
-    # Loop principal de iteração (agora dentro da thread)
+    # Loop principal de iteração
     for t in range(T):
-        if stop_event.is_set():
-            break # Para se a convergência foi atingida
+        
+        # Parada segura
+        if grids['converged']: break
 
-        local_max_change = 0.0
         current_grid = grids['current']
         next_grid = grids['next']
+        local_max_change = 0.0
 
         # 2. Faz o cálculo APENAS para sua fatia
         for i in range(start_row, end_row):
@@ -43,58 +42,57 @@ def worker_thread(thread_id, num_threads, grids, N, barrier, stop_event, T, max_
                                     current_grid[i, j+1] + current_grid[i, j-1])
                 
                 local_max_change = max(local_max_change, abs(new_value - current_grid[i, j]))
-                next_grid[i, j] = new_value
+                next_grid[i, j] = new_value 
 
-        # 3. Armazena sua mudança máxima e espera pelas outras
-        max_changes[thread_id] = local_max_change
-        barrier.wait() # <--- PONTO DE SINCRONIZAÇÃO 1
-
-        # 4. Apenas UMA thread (ex: a 0) faz a verificação e a cópia
-        if thread_id == 0:
-            # Verifica a convergência
-            global_max_change = max(max_changes)
-            if global_max_change < max_diff:
-                stop_event.set()
+        # 3. Bloco Crítico de Sincronização
+        with GLOBAL_SYNC_LOCK:
+            MAX_CHANGES_LIST.append(local_max_change)
+            THREADS_COMPUTED += 1
             
-            # Atualiza a matriz para a próxima iteração
-            grids['current'] = grids['next'].copy()
-            # A borda superior (fonte de calor) deve ser re-setada na next_grid
-            # ou na current_grid após a cópia, para garantir que não se 'apague'
-            grids['current'][0, :] = 100.0 # Garante a fonte de calor
-            grids['next'] = grids['current'].copy()
+            # 4. Se TODAS as threads terminaram, a thread final faz o commit
+            if THREADS_COMPUTED == num_threads:
+                
+                # A. Verifica a convergência
+                global_max_change = max(MAX_CHANGES_LIST)
+                if global_max_change < max_diff:
+                    grids['converged'] = True
+                    
+                # B. Cópia Atômica
+                grids['current'][:] = grids['next'][:]
+                
+                # C. Reseta os contadores
+                MAX_CHANGES_LIST.clear()
+                THREADS_COMPUTED = 0
 
-        # 5. Espera a thread 0 terminar a cópia antes de ir para a próxima iteração
-        barrier.wait() # <--- PONTO DE SINCRONIZAÇÃO 2
-
-# --- Nova Função: O "main" da versão paralela ---
+# --- Função Principal ---
 def heat_diffusion_paralelo(N, T, max_diff, num_threads):
-    """
-    Executa a simulação paralela de difusão de calor.
-    """
+    global MAX_CHANGES_LIST, THREADS_COMPUTED
+    MAX_CHANGES_LIST = [] 
+    THREADS_COMPUTED = 0
+    
+    if num_threads <= 1:
+        return heat_diffusion_sequencial(N, T, max_diff)
+
     current_grid = initialize_grid(N)
     next_grid = current_grid.copy()
     
-    # Estruturas compartilhadas
-    grids = {'current': current_grid, 'next': next_grid}
-    max_changes = [0.0] * num_threads # Lista para cada thread reportar seu max_change
+    grids = {
+        'current': current_grid, 
+        'next': next_grid,
+        'converged': False, 
+        'max_diff': max_diff,
+        'num_threads': num_threads 
+    }
     
-    # Barrier: espera por 'num_threads' threads antes de liberar
-    barrier = threading.Barrier(num_threads)
-    # Event: para avisar a todas as threads para pararem
-    stop_event = threading.Event()
-
     threads = []
-    
     start_time = time.time()
     
-    # Cria e inicia as threads
     for i in range(num_threads):
         t = threading.Thread(target=worker_thread, 
-                             args=(i, num_threads, grids, N, barrier, stop_event, T, max_diff, max_changes))
+                             args=(i, grids, N, T, max_diff))
         threads.append(t)
         t.start()
 
-    # Espera todas as threads terminarem
     for t in threads:
         t.join()
 
@@ -102,22 +100,16 @@ def heat_diffusion_paralelo(N, T, max_diff, num_threads):
     
     return (end_time - start_time) * 1000, grids['current']
 
-
 if __name__ == '__main__':
-    N_TEST = 500
+    N_TEST = 200
     T_TEST = 1000
-    NUM_THREADS = 4 # Defina o número de threads (ex: 4)
+    NUM_THREADS = 4 
 
-    print(f"Iniciando simulação sequencial ({N_TEST}x{N_TEST}, {T_TEST} iterações)...")
-    tempo_seq, matriz_seq = heat_diffusion_sequencial(N_TEST, T_TEST)
-    print(f"Tempo Sequencial (Baseline): {tempo_seq:.2f} ms")
+    tempo_seq, matriz_seq = heat_diffusion_sequencial(N_TEST, T_TEST, 0.001)
 
-    print(f"Iniciando simulação paralela ({NUM_THREADS} threads)...")
     tempo_par, matriz_par = heat_diffusion_paralelo(N_TEST, T_TEST, 0.001, NUM_THREADS)
-    print(f"Tempo Paralelo: {tempo_par:.2f} ms")
     
-    # Verificação (importante!): checa se os resultados são (quase) idênticos
-    # if np.allclose(matriz_seq, matriz_par):
-    #     print("Resultados são consistentes!")
-    # else:
-    #     print("ERRO: Resultados diferem!")
+    if np.allclose(matriz_seq, matriz_par, atol=1e-3):
+        print("Resultados são consistentes! ✅")
+    else:
+        print("ERRO: Resultados diferem! ❌")
