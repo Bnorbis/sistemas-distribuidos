@@ -5,174 +5,220 @@ import threading
 import os
 import sys
 
-# --- IMPORTAÇÕES DAS SUAS VERSÕES (Removido o loop circular) ---
 from heat_diffusion_sequencial import heat_diffusion_sequencial, initialize_grid
 from heat_paralelo import heat_diffusion_paralelo
-from server import heat_diffusion_distribuido 
+from server import heat_diffusion_distribuido
 
-# --- CONFIGURAÇÕES GLOBAIS DE TESTE ---
-TAMANHOS_N = [200]                   # Foco na matriz 200x200 para estabilidade
-ITERATIONS_T = 1000                   
-NUM_THREADS = [1, 2, 4]              
-NUM_HOSTS_DIST = [1, 2, 3]           
-MAX_DIFF = 0.001                      
-PORT_BASE = 5000                      # Porta base para rotação
+TAMANHOS_N = [200, 400, 800]
+ITERATIONS_T = 1000
+NUM_THREADS = [1, 2, 4]
+NUM_HOSTS_DIST = [1, 2, 3]
+MAX_DIFF = 0.001
+PORT_BASE = 5000
 
-# =========================================================================
-# FUNÇÕES DE VALIDAÇÃO E EXECUÇÃO
-# =========================================================================
+
+# ---------------------------------------------------------
+# Funções auxiliares
+# ---------------------------------------------------------
 
 def check_correctness(C_seq, C_test, test_name):
-    """Verifica se o resultado da matriz de teste é igual à matriz sequencial."""
     if C_test is None:
-        print(f"[{test_name}] ❌ FALHA: Resultado é nulo (Erro de execução/conexão).")
-        return False
-    
-    # Tolerância aumentada para 1e-1 (0.1) para aceitar erros de ponto flutuante do paralelismo.
-    if np.allclose(C_seq, C_test, atol=1e-1): 
-        print(f"[{test_name}] ✅ Correto: Resultado idêntico ao Sequencial (tolerância 1e-1).")
-        return True
-    else:
-        # Erro lógico grave (o resultado está muito distante do sequencial).
-        print(f"[{test_name}] ❌ ERRO: Resultado DIFERE do Sequencial.")
+        print(f"[{test_name}] Resultado nulo. Provável erro de execução.")
         return False
 
-def run_with_timeout(func, args, timeout_s=30):
-    """Executa uma função em uma thread separada com um limite de tempo."""
-    result_list = [None, None] 
-    
+    if np.allclose(C_seq, C_test, atol=1e-1):
+        print(f"[{test_name}] OK (dentro da tolerância).")
+        return True
+    else:
+        print(f"[{test_name}] Resultados diferentes do sequencial.")
+        return False
+
+
+def run_with_timeout(func, args, timeout_s=2000):
+    result_list = [None, None]
+
     def target():
         try:
             result_list[0], result_list[1] = func(*args)
         except Exception as e:
-            result_list[0] = f"ERRO_EXECUCAO: {e}"
+            result_list[0] = f"ERRO: {e}"
             result_list[1] = None
-    
+
     thread = threading.Thread(target=target)
     thread.start()
-    thread.join(timeout_s) 
-    
+    thread.join(timeout_s)
+
     if thread.is_alive():
-        print(f"⚠️ Alerta: Função '{func.__name__}' atingiu o TIMEOUT de {timeout_s}s.")
-        return f"TIMEOUT", None
-    
+        print(f"Timeout: {func.__name__} demorou mais que {timeout_s}s.")
+        return "TIMEOUT", None
+
     return result_list[0], result_list[1]
 
+
+# ---------------------------------------------------------
+# Execução principal dos testes
+# ---------------------------------------------------------
+
 def run_tests():
-    """Executa todos os testes de desempenho e coleta os dados brutos."""
     results = []
-    
-    # 1. TESTE DE ESCALABILIDADE PELO TAMANHO (SEQUENCIAL E PARALELO)
-    print("\n\n=============== 1. TESTE DE ESCALABILIDADE (TAMANHO DA MATRIZ) ===============")
-    
+    resultados_sequenciais = {}
+
+    print("\n=== Teste 1: escalabilidade pelo tamanho da matriz ===")
+
     for N in TAMANHOS_N:
-        print(f"\n--- Matriz {N}x{N} ---")
-        
-        # --- SEQUENCIAL (Baseline) ---
-        tempo_seq, C_seq = run_with_timeout(heat_diffusion_sequencial, (N, ITERATIONS_T, MAX_DIFF), timeout_s=60)
-        
+        print(f"\nTamanho: {N}x{N}")
+
+        # Sequencial
+        tempo_seq, C_seq = run_with_timeout(
+            heat_diffusion_sequencial, (N, ITERATIONS_T, MAX_DIFF), timeout_s=2000
+        )
+
         if tempo_seq != "TIMEOUT":
+            print(f"Sequencial: {tempo_seq:.2f} ms")
+            resultados_sequenciais[N] = C_seq
             results.append({
-                'Versao': 'Sequencial', 'Tamanho_N': N, 'Iteracoes_T': ITERATIONS_T, 
-                'Parametro_Especial': 1, 'Tempo_ms': tempo_seq, 'Status': 'OK'
+                'Versao': 'Sequencial',
+                'Tamanho_N': N,
+                'Iteracoes_T': ITERATIONS_T,
+                'Parametro_Especial': 1,
+                'Tempo_ms': tempo_seq,
+                'Status': 'OK'
             })
-            print(f"Sequencial concluído em {tempo_seq:.2f} ms.")
         else:
-            C_seq = None
+            resultados_sequenciais[N] = None
 
-
-        # --- PARALELO (Com número fixo de Threads para comparação de N) ---
+        # Paralelo
         if C_seq is not None:
-            NUM_T = 4 if os.cpu_count() >= 4 else os.cpu_count()
-            tempo_par, C_par = run_with_timeout(heat_diffusion_paralelo, (N, ITERATIONS_T, MAX_DIFF, NUM_T), timeout_s=60)
-            
+            num_threads = 4 if os.cpu_count() >= 4 else os.cpu_count()
+            tempo_par, C_par = run_with_timeout(
+                heat_diffusion_paralelo, (N, ITERATIONS_T, MAX_DIFF, num_threads), timeout_s=2000
+            )
+
             if tempo_par != "TIMEOUT":
+                print(f"Paralelo ({num_threads} threads): {tempo_par:.2f} ms")
+                check_correctness(C_seq, C_par, f"Paralela {N}x{N}")
                 results.append({
-                    'Versao': 'Paralela', 'Tamanho_N': N, 'Iteracoes_T': ITERATIONS_T, 
-                    'Parametro_Especial': NUM_T, 'Tempo_ms': tempo_par, 'Status': 'OK'
+                    'Versao': 'Paralela',
+                    'Tamanho_N': N,
+                    'Iteracoes_T': ITERATIONS_T,
+                    'Parametro_Especial': num_threads,
+                    'Tempo_ms': tempo_par,
+                    'Status': 'OK'
                 })
-                print(f"Paralelo concluído em {tempo_par:.2f} ms.")
-                check_correctness(C_seq, C_par, f"Paralela ({N}x{N})")
 
+    # -----------------------------------------------------
+    print("\n=== Teste 2: escalabilidade pelo número de threads ===")
+    # -----------------------------------------------------
 
-    # 2. TESTE DE SCALABILIDADE PARALELA (NUMERO DE THREADS)
-    print("\n\n=============== 2. TESTE DE ESCALABILIDADE (NUM. DE THREADS) ===============")
-    N_FIXO = 200 # Tamanho fixo para isolar o efeito da thread
-    
-    tempo_seq_fixo, C_seq_fixo = heat_diffusion_sequencial(N_FIXO, ITERATIONS_T, MAX_DIFF)
-    
-    for NUM_T in NUM_THREADS:
-        tempo_par, C_par = run_with_timeout(heat_diffusion_paralelo, (N_FIXO, ITERATIONS_T, MAX_DIFF, NUM_T), timeout_s=30)
-        
+    N_FIXO = 200
+    C_seq_ref = resultados_sequenciais.get(N_FIXO)
+
+    if C_seq_ref is None:
+        _, C_seq_ref = heat_diffusion_sequencial(N_FIXO, ITERATIONS_T, MAX_DIFF)
+
+    for t in NUM_THREADS:
+        tempo_par, C_par = run_with_timeout(
+            heat_diffusion_paralelo, (N_FIXO, ITERATIONS_T, MAX_DIFF, t), timeout_s=2000
+        )
+
         if tempo_par != "TIMEOUT":
+            print(f"{t} threads: {tempo_par:.2f} ms")
+            check_correctness(C_seq_ref, C_par, f"{t} threads")
             results.append({
-                'Versao': 'Paralela', 'Tamanho_N': N_FIXO, 'Iteracoes_T': ITERATIONS_T, 
-                'Parametro_Especial': NUM_T, 'Tempo_ms': tempo_par, 'Status': 'OK'
+                'Versao': 'Paralela',
+                'Tamanho_N': N_FIXO,
+                'Iteracoes_T': ITERATIONS_T,
+                'Parametro_Especial': t,
+                'Tempo_ms': tempo_par,
+                'Status': 'OK'
             })
-            print(f"Paralelo concluído em {tempo_par:.2f} ms.")
-            check_correctness(C_seq_fixo, C_par, f"Paralela ({NUM_T} threads)")
         else:
-            print(f"Paralelo ({NUM_T} threads) PULADO devido ao TIMEOUT.")
+            print(f"{t} threads: timeout")
 
+    # -----------------------------------------------------
+    print("\n=== Teste 3: execução distribuída ===")
+    print("Antes de rodar, inicie os workers manualmente conforme pedido.\n")
+    # -----------------------------------------------------
 
-    # 3. TESTE DE SCALABILIDADE DISTRIBUÍDA (NUMERO DE HOSTS/WORKERS)
-    print("\n\n=============== 3. TESTE DE ESCALABILIDADE (NUM. DE HOSTS) ===============")
-    
-    # --- ALERTA DE SINCRONIZAÇÃO MANUAL ---
-    print("\n\n##########################################################################")
-    print("#  🔴 AÇÃO MANUAL OBRIGATÓRIA: INÍCIO DOS WORKERS 🔴                     #")
-    print("#  INICIE worker.py em 'n' terminais (n=1, 2, 3) AGORA!                  #")
-    print("##########################################################################\n")
-    
-    time.sleep(5) 
-    
-    N_FIXO = 200 
-    
-    for i, NUM_H in enumerate(NUM_HOSTS_DIST):
-        PORT_DYN = PORT_BASE + i # Porta rotativa: 5000, 5001, 5002
-        print(f"\n--- Teste com {NUM_H} Hosts (Porta: {PORT_DYN}) ---")
-        
-        # --- AÇÃO MANUAL ---
-        print(f"📢 **AVISO**: Para este teste, inicie {NUM_H} Workers com o comando:")
-        print(f"               python3 worker.py localhost {PORT_DYN}")
-        
-        try:
-            tempo_dist, C_dist = run_with_timeout(heat_diffusion_distribuido, 
-                                                  (N_FIXO, ITERATIONS_T, MAX_DIFF, NUM_H, 'localhost', PORT_DYN), 
-                                                  timeout_s=90)
-            
-            if tempo_dist != "TIMEOUT":
-                results.append({
-                    'Versao': 'Distribuida', 'Tamanho_N': N_FIXO, 'Iteracoes_T': ITERATIONS_T, 
-                    'Parametro_Especial': NUM_H, 'Tempo_ms': tempo_dist, 'Status': 'OK'
-                })
-                print(f"Distribuído concluído em {tempo_dist:.2f} ms.")
-                check_correctness(C_seq_fixo, C_dist, f"Distribuida ({NUM_H} hosts)")
-            else:
-                 print(f"Distribuído ({NUM_H} hosts) PULADO devido ao TIMEOUT.")
+    port_counter = 0
 
-        except Exception as e:
-            error_message = str(e).replace('\n', ' ')
-            print(f"❌ Falha no teste distribuído com {NUM_H} hosts. Erro: {error_message}")
+    # --- 3.1 Escalabilidade por tamanho ---
+    print("\n--- Teste distribuído 3.1: diferentes tamanhos ---")
+    NUM_H_FIXO = 2
+
+    for N in TAMANHOS_N:
+        port = PORT_BASE + port_counter
+        port_counter += 1
+
+        print(f"\nMatriz {N}x{N} usando {NUM_H_FIXO} hosts (porta {port})")
+        print("Inicie os workers com:")
+        print(f"  python3 worker.py localhost {port}")
+
+        C_seq_ref = resultados_sequenciais.get(N)
+
+        tempo_dist, C_dist = run_with_timeout(
+            heat_diffusion_distribuido,
+            (N, ITERATIONS_T, MAX_DIFF, NUM_H_FIXO, 'localhost', port),
+            timeout_s=2000
+        )
+
+        if tempo_dist != "TIMEOUT":
+            print(f"Distribuído: {tempo_dist:.2f} ms")
+            if C_seq_ref is not None:
+                check_correctness(C_seq_ref, C_dist, f"Dist {N}x{N}")
             results.append({
-                'Versao': 'Distribuida', 'Tamanho_N': N_FIXO, 'Iteracoes_T': ITERATIONS_T, 
-                'Parametro_Especial': NUM_H, 'Tempo_ms': 0.0, 'Status': 'ERRO_FATAL'
+                'Versao': 'Distribuida',
+                'Tamanho_N': N,
+                'Iteracoes_T': ITERATIONS_T,
+                'Parametro_Especial': NUM_H_FIXO,
+                'Tempo_ms': tempo_dist,
+                'Status': 'OK'
             })
 
+    # --- 3.2 Escalabilidade por número de hosts ---
+    print("\n--- Teste distribuído 3.2: número de hosts ---")
+    N_FIXO_DIST = 200
 
-    # Geração do DataFrame e Arquivo CSV
+    for h in NUM_HOSTS_DIST:
+        port = PORT_BASE + port_counter
+        port_counter += 1
+
+        print(f"\nMatriz {N_FIXO_DIST}x{N_FIXO_DIST} com {h} hosts (porta {port})")
+        print("Inicie os workers com:")
+        print(f"  python3 worker.py localhost {port}")
+
+        C_seq_ref = resultados_sequenciais.get(N_FIXO_DIST)
+        if C_seq_ref is None:
+            _, C_seq_ref = heat_diffusion_sequencial(N_FIXO_DIST, ITERATIONS_T, MAX_DIFF)
+
+        tempo_dist, C_dist = run_with_timeout(
+            heat_diffusion_distribuido,
+            (N_FIXO_DIST, ITERATIONS_T, MAX_DIFF, h, 'localhost', port),
+            timeout_s=2000
+        )
+
+        if tempo_dist != "TIMEOUT":
+            print(f"{h} hosts: {tempo_dist:.2f} ms")
+            check_correctness(C_seq_ref, C_dist, f"{h} hosts")
+            results.append({
+                'Versao': 'Distribuida',
+                'Tamanho_N': N_FIXO_DIST,
+                'Iteracoes_T': ITERATIONS_T,
+                'Parametro_Especial': h,
+                'Tempo_ms': tempo_dist,
+                'Status': 'OK'
+            })
+
     df = pd.DataFrame(results)
-    output_csv = 'dados_brutos.csv'
-    df.to_csv(output_csv, index=False)
-    
-    print("\n\n==========================================================================")
-    print(f"✅ FASE DE COLETA CONCLUÍDA. Dados brutos salvos em: {output_csv}")
-    print("==========================================================================")
-    
+    df.to_csv('dados_brutos.csv', index=False)
+
+    print("\nColeta concluída. Arquivo salvo: dados_brutos.csv\n")
+
     return df
+
 
 if __name__ == '__main__':
     try:
         run_tests()
     except Exception as e:
-        print(f"\n[ERRO FATAL NA EXECUÇÃO] Ocorreu um erro que impediu a conclusão dos testes: {e}")
+        print(f"Erro geral durante a execução: {e}")
