@@ -9,6 +9,7 @@ from heat_diffusion_sequencial import heat_diffusion_sequencial, initialize_grid
 from heat_paralelo import heat_diffusion_paralelo
 from server import heat_diffusion_distribuido
 
+# Listas de parâmetros usados nos testes: tamanhos da matriz, nº de iterações, threads etc.
 TAMANHOS_N = [200, 400, 800]
 ITERATIONS_T = 1000
 NUM_THREADS = [1, 2, 4]
@@ -22,6 +23,10 @@ PORT_BASE = 5000
 # ---------------------------------------------------------
 
 def check_correctness(C_seq, C_test, test_name):
+    """
+    Confere se a matriz testada bate com a versão sequencial.
+    Apenas alerta se der erro — não interrompe o programa.
+    """
     if C_test is None:
         print(f"[{test_name}] Resultado nulo. Provável erro de execução.")
         return False
@@ -35,15 +40,21 @@ def check_correctness(C_seq, C_test, test_name):
 
 
 def run_with_timeout(func, args, timeout_s=2000):
+    """
+    Executa uma função que pode travar — então rodamos em uma thread separada.
+    Se ultrapassar o tempo limite, devolve TIMEOUT.
+    """
     result_list = [None, None]
 
     def target():
         try:
+            # A função sempre devolve (tempo, matriz)
             result_list[0], result_list[1] = func(*args)
         except Exception as e:
             result_list[0] = f"ERRO: {e}"
             result_list[1] = None
 
+    # Cria a thread e espera até o limite
     thread = threading.Thread(target=target)
     thread.start()
     thread.join(timeout_s)
@@ -68,7 +79,7 @@ def run_tests():
     for N in TAMANHOS_N:
         print(f"\nTamanho: {N}x{N}")
 
-        # Sequencial
+        # 1. Executa a versão sequencial como referência
         tempo_seq, C_seq = run_with_timeout(
             heat_diffusion_sequencial, (N, ITERATIONS_T, MAX_DIFF), timeout_s=2000
         )
@@ -87,9 +98,10 @@ def run_tests():
         else:
             resultados_sequenciais[N] = None
 
-        # Paralelo
+        # 2. Executa a versão paralela, mas só se o sequencial deu certo
         if C_seq is not None:
             num_threads = 4 if os.cpu_count() >= 4 else os.cpu_count()
+
             tempo_par, C_par = run_with_timeout(
                 heat_diffusion_paralelo, (N, ITERATIONS_T, MAX_DIFF, num_threads), timeout_s=2000
             )
@@ -113,6 +125,7 @@ def run_tests():
     N_FIXO = 200
     C_seq_ref = resultados_sequenciais.get(N_FIXO)
 
+    # Se não foi rodado acima, roda agora
     if C_seq_ref is None:
         _, C_seq_ref = heat_diffusion_sequencial(N_FIXO, ITERATIONS_T, MAX_DIFF)
 
@@ -142,7 +155,7 @@ def run_tests():
 
     port_counter = 0
 
-    # --- 3.1 Escalabilidade por tamanho ---
+    # --- 3.1 Escalabilidade por tamanho da matriz ---
     print("\n--- Teste distribuído 3.1: diferentes tamanhos ---")
     NUM_H_FIXO = 2
 
@@ -209,6 +222,7 @@ def run_tests():
                 'Status': 'OK'
             })
 
+    # Salva tudo numa planilha para análise posterior
     df = pd.DataFrame(results)
     df.to_csv('dados_brutos.csv', index=False)
 
